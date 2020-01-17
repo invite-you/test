@@ -70,7 +70,13 @@ class ShipDataset(Dataset):
 
 def collater(data):
     if len(data) == 0: return {}
-    imgs = [s['img'] for s in data]
+    try:
+        imgs = [s['img'] for s in data]
+    except:
+        print(type(data))
+        print(data)
+        print(data.keys())
+        exit()
     annots = [s['annot'] for s in data]
     #scales = [s['scale'] for s in data]
     imgs = torch.from_numpy(np.stack(imgs, axis=0))
