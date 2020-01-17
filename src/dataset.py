@@ -32,21 +32,20 @@ class ShipDataset(Dataset):
         return self.size
 
     def __getitem__(self, idx):
-        img = self.load_image(idx)
-        annot = self.load_annotations(idx)
-        sample = {'img': img, 'annot': annot}
+        try:
+            img = self.load_image(idx)
+            annot = self.load_annotations(idx)
+            sample = {'img': img, 'annot': annot}
+        except:
+            return {}
         return sample
 
     def load_image(self, idx):
         image_id = self.labels[idx]['image_id']
         file_path = os.path.join(self.root_dir, 'images', image_id)
-        try:
-            img = cv2.imread(file_path)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        except:
-            print(file_path)
-            exit()
-
+        img = cv2.imread(file_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
         # if len(img.shape) == 2:
         #     img = skimage.color.gray2rgb(img)
 
