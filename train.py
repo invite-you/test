@@ -46,13 +46,13 @@ def train(opt):
                        "shuffle": True,
                        "drop_last": True,
                        "collate_fn": collater,
-                       "num_workers": 1}
+                       "num_workers": 4}
 
     test_params = {"batch_size": 1,#opt.batch_size,
                    "shuffle": False,
                    "drop_last": False,
                    "collate_fn": collater,
-                   "num_workers": 1}
+                   "num_workers": 4}
 
     training_set = ShipDataset(root_dir=opt.data_path, label_name="train_lables.json", transform=transforms.Compose([Normalizer(), Augmenter(), Resizer()]))
     training_generator = DataLoader(training_set, **training_params)
