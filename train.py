@@ -42,13 +42,13 @@ def train(opt):
     else:
         torch.manual_seed(123)
 
-    training_params = {"batch_size": 10,#opt.batch_size * num_gpus,
+    training_params = {"batch_size": 1,#opt.batch_size * num_gpus,
                        "shuffle": True,
                        "drop_last": True,
                        "collate_fn": collater,
                        "num_workers": 4}
 
-    test_params = {"batch_size": 10,#opt.batch_size,
+    test_params = {"batch_size": 1,#opt.batch_size,
                    "shuffle": False,
                    "drop_last": False,
                    "collate_fn": collater,
