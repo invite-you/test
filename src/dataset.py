@@ -44,6 +44,7 @@ class ShipDataset(Dataset):
             return sample
             
         except:
+            print("error: label index ", idx)
             return {'img': {}, 'annot': {}}
         return sample
 
