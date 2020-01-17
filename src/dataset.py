@@ -40,9 +40,12 @@ class ShipDataset(Dataset):
     def load_image(self, idx):
         image_id = self.labels[idx]['image_id']
         file_path = os.path.join(self.root_dir, 'images', image_id)
-        print(file_path)
-        img = cv2.imread(file_path)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        try:
+            img = cv2.imread(file_path)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        except:
+            print(file_path)
+            exit()
 
         # if len(img.shape) == 2:
         #     img = skimage.color.gray2rgb(img)
