@@ -23,7 +23,7 @@ class ShipDataset(Dataset):
             
             anot = dict()            
             anot['answer'] = properties['type_id']
-            anot['image_id'] = properties['image_id']
+            anot['image_filename'] = properties['image_id']
             anot['bbox'] = np.array([float(num) for num in properties['bounds_imcoords'].split(",")])
             
             self.labels.append(anot)
@@ -41,8 +41,8 @@ class ShipDataset(Dataset):
         return sample
 
     def load_image(self, idx):
-        image_id = self.labels[idx]['image_id']
-        file_path = os.path.join(self.root_dir, 'images', image_id)
+        image_filename = self.labels[idx]['image_filename']
+        file_path = os.path.join(self.root_dir, 'images', image_filename)
         img = cv2.imread(file_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     
@@ -69,7 +69,7 @@ class ShipDataset(Dataset):
 
 
 def collater(data):
-    imgs = [s['img'] for s in data]
+    imgs = [s['image_filename'] for s in data]
     annots = [s['annot'] for s in data]
     #scales = [s['scale'] for s in data]
     imgs = torch.from_numpy(np.stack(imgs, axis=0))
