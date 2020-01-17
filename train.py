@@ -54,10 +54,10 @@ def train(opt):
                    "collate_fn": collater,
                    "num_workers": 1}
 
-    training_set = ShipDataset(root_dir=opt.data_path, label_name="train_lables.json")
+    training_set = ShipDataset(root_dir=opt.data_path, label_name="train_lables.json", transform=transforms.Compose([Normalizer(), Augmenter(), Resizer()]))
     training_generator = DataLoader(training_set, **training_params)
 
-    test_set = ShipDataset(root_dir=opt.data_path, label_name="test_lables.json")
+    test_set = ShipDataset(root_dir=opt.data_path, label_name="test_lables.json", transform=transforms.Compose([Normalizer(), Augmenter(), Resizer()]))
     test_generator = DataLoader(test_set, **test_params)
 
     model = EfficientDet(num_classes=training_set.num_classes())
