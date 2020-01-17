@@ -81,7 +81,7 @@ def collater(data):
     
     imgs = [s['img'] for s in data if len(s['img']) != 0]
     annots = [s['annot'] for s in data if len(s['annot']) != 0]
-    scales = [s['scale'] for s in data if len(s['scale']) != 0]
+    
     
     imgs = torch.from_numpy(np.stack(imgs, axis=0))
 
