@@ -56,7 +56,6 @@ class FocalLoss(nn.Module):
             classification = torch.clamp(classification, 1e-4, 1.0 - 1e-4)
 
             IoU = calc_iou(anchors[0, :, :], bbox_annotation[:, :4])
-            print(IoU)
 
             IoU_max, IoU_argmax = torch.max(IoU, dim=1)
 
@@ -74,11 +73,13 @@ class FocalLoss(nn.Module):
             assigned_annotations = bbox_annotation[IoU_argmax, :]
             
             print(assigned_annotations)
-
+            print(assigned_annotations.shape)
+            print(positive_indices.shape)
+            print(targets.shape)
+            
             targets[positive_indices, :] = 0
             targets[positive_indices, assigned_annotations[positive_indices, 4].long()] = 1
 
-            print(targets)
             
             alpha_factor = torch.ones(targets.shape) * alpha
             if torch.cuda.is_available():
