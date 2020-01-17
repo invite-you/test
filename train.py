@@ -46,13 +46,13 @@ def train(opt):
                        "shuffle": True,
                        "drop_last": True,
                        "collate_fn": collater,
-                       "num_workers": 6}
+                       "num_workers": 12}
 
     test_params = {"batch_size": opt.batch_size,
                    "shuffle": False,
                    "drop_last": False,
                    "collate_fn": collater,
-                   "num_workers": 6}
+                   "num_workers": 12}
 
     training_set = ShipDataset(root_dir=opt.data_path, label_name="train_lables.json")
     training_generator = DataLoader(training_set, **training_params)
@@ -92,6 +92,7 @@ def train(opt):
         epoch_loss = []
         progress_bar = tqdm(training_generator)
         for iter, data in enumerate(progress_bar):
+            if len(data) == 0: continue
             try:
                 optimizer.zero_grad()
                 if torch.cuda.is_available():
@@ -128,6 +129,7 @@ def train(opt):
             loss_regression_ls = []
             loss_classification_ls = []
             for iter, data in enumerate(test_generator):
+                if len(data) == 0: continue
                 with torch.no_grad():
                     if torch.cuda.is_available():
                         cls_loss, reg_loss = model([data['img'].cuda().float(), data['annot'].cuda()])
