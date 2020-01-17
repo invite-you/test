@@ -7,9 +7,10 @@ from torch.utils.data import Dataset, DataLoader
 import cv2
 
 class ShipDataset(Dataset):
-    def __init__(self, root_dir, label_name):
+    def __init__(self, root_dir, label_name, transform=None):
         self.root_dir = root_dir
-
+        self.transform = transform
+        
         #label_filepath = os.path.join(root_dir, 'labels.json')
         label_filepath = os.path.join(root_dir, label_name)
         with open(label_filepath) as f:
@@ -35,7 +36,13 @@ class ShipDataset(Dataset):
         try:
             img = self.load_image(idx)
             annot = self.load_annotations(idx)
+            
             sample = {'img': img, 'annot': annot}
+            
+            if self.transform:
+                sample = self.transform(sample)
+            return sample
+            
         except:
             return {'img': {}, 'annot': {}}
         return sample
