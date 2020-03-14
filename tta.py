@@ -214,7 +214,7 @@ for x in range(0, loopx+1):
             maxY = height
         print(minY,maxY, minX,maxX)
 """
-crop_size = [(0, 768), (348, 1116), (768, 1536), (1116, 1884), (1464, 2232), (1812, 2580), (2160, 2928), (2232,3000)]
+crop_size = [(0, 768), (744, 1512), (1488, 2256), (2232, 3000)]
 for minY,maxY in crop_size:
     for minX,maxX in crop_size:
 
