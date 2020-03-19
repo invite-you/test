@@ -20,7 +20,7 @@ from segmentation_models.utils import set_trainable
 # or you could switch to other framework using `sm.set_framework('tf.keras')`
 
 ## 그간 학습했던 웨이트 불러오기
-load_weights = r'/content/gdrive/My Drive/findShip/models/resnet34_finetune_01_0.7766.h5'
+load_weights = r'/content/gdrive/My Drive/findShip/models/resnet34_finetune_04_0.7794.h5'
 
 
 base_dir = r"/content/gdrive/My Drive/findShip/"
