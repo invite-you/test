@@ -21,7 +21,7 @@ from segmentation_models.utils import set_trainable
 
 
 ## 그간 학습했던 웨이트 불러오기
-load_weights = r'/content/gdrive/My Drive/findShip/models/efficientnetb4_finetune_01_0.6304.h5'
+load_weights = r'/content/gdrive/My Drive/findShip/models/efficientnetb4_finetune_06_0.5806.h5'
 
 base_dir = r"/content/gdrive/My Drive/findShip/"
 # TODO: 전체 테스트셋을 하나의 파일로 만들기
