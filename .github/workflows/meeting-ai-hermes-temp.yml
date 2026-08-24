@@ -1,0 +1,166 @@
+name: Temporary Meeting.ai Hermes inspection
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  hermes:
+    if: github.head_ref == 'meeting-ai-static-analysis-20260824'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y binutils file jq python3 python3-pip unzip zip
+          python3 -m pip install --upgrade pip
+          python3 -m pip install 'hermes-dec==0.1.6'
+          python3 -m pip freeze | grep -i hermes | tee /tmp/hermes-packages.txt
+          command -v hbc-file-parser || true
+          command -v hbc-decompiler || true
+          command -v hbc-disassembler || true
+
+      - name: Download APK and extract embedded Hermes bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p work/xapk work/base result
+          curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 900 \
+            -A 'Mozilla/5.0' \
+            -e 'https://apkpure.net/meeting-ai-ai-visual-notes/ai.meeting.app/download' \
+            'https://d.apkpure.net/b/XAPK/ai.meeting.app?version=latest' -o work/package.xapk
+          unzip -q work/package.xapk -d work/xapk
+          cp work/xapk/ai.meeting.app.apk work/base.apk
+          unzip -q work/base.apk assets/index.android.bundle assets/app.config -d work/base
+          cp work/base/assets/index.android.bundle result/embedded-index.android.bundle
+          cp work/base/assets/app.config result/app.config
+          file result/embedded-index.android.bundle | tee result/embedded_bundle_file.txt
+          sha256sum result/embedded-index.android.bundle | tee result/embedded_bundle_sha256.txt
+          strings -a -n 5 result/embedded-index.android.bundle > result/embedded_bundle_strings.txt
+
+      - name: Decompile embedded Hermes bytecode
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uxo pipefail
+          hbc-file-parser result/embedded-index.android.bundle > result/embedded_hbc_header.txt 2> result/embedded_hbc_header.err
+          hbc-decompiler result/embedded-index.android.bundle result/embedded_decompiled.js > result/embedded_decompiler.stdout 2> result/embedded_decompiler.stderr
+          test -f result/embedded_decompiled.js && gzip -9 result/embedded_decompiled.js
+
+      - name: Query current Expo OTA update for runtime 3.1.0
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uxo pipefail
+          curl -fLsS --retry 3 --connect-timeout 20 --max-time 300 \
+            -D result/ota_response_headers.txt \
+            -H 'expo-protocol-version: 1' \
+            -H 'expo-platform: android' \
+            -H 'expo-runtime-version: 3.1.0' \
+            -H 'expo-channel-name: even-prod-build' \
+            -H 'accept: multipart/mixed,application/expo+json,application/json' \
+            'https://u.expo.dev/2bfed80c-99db-421d-a514-742f1184a029' \
+            -o result/ota_response.bin
+          file result/ota_response.bin | tee result/ota_response_file.txt
+          sha256sum result/ota_response.bin | tee result/ota_response_sha256.txt
+
+          python3 - <<'PY'
+          import json, re, subprocess
+          from email import policy
+          from email.parser import BytesParser
+          from pathlib import Path
+
+          out=Path('result')
+          raw=(out/'ota_response.bin').read_bytes()
+          hdr=(out/'ota_response_headers.txt').read_text(errors='replace')
+          m=re.search(r'(?im)^content-type:\s*([^\r\n]+)',hdr)
+          ctype=m.group(1).strip() if m else ''
+          manifests=[]
+          if 'multipart/' in ctype.lower():
+              msg=BytesParser(policy=policy.default).parsebytes((f'Content-Type: {ctype}\r\nMIME-Version: 1.0\r\n\r\n').encode()+raw)
+              for i,part in enumerate(msg.iter_parts()):
+                  payload=part.get_payload(decode=True) or b''
+                  (out/f'ota_part_{i}.bin').write_bytes(payload)
+                  (out/f'ota_part_{i}_headers.txt').write_text(str(part),encoding='utf-8',errors='replace')
+                  try:
+                      obj=json.loads(payload)
+                      manifests.append(obj)
+                      (out/f'ota_part_{i}.json').write_text(json.dumps(obj,indent=2,ensure_ascii=False),encoding='utf-8')
+                  except Exception:
+                      pass
+          else:
+              try:
+                  obj=json.loads(raw)
+                  manifests.append(obj)
+                  (out/'ota_response.json').write_text(json.dumps(obj,indent=2,ensure_ascii=False),encoding='utf-8')
+              except Exception:
+                  pass
+
+          urls=[]
+          def walk(x):
+              if isinstance(x,dict):
+                  for k,v in x.items():
+                      if k in {'url','launchAsset'} and isinstance(v,str) and v.startswith('http'): urls.append(v)
+                      walk(v)
+              elif isinstance(x,list):
+                  for v in x: walk(v)
+          for obj in manifests: walk(obj)
+          urls=list(dict.fromkeys(urls))
+          (out/'ota_urls.txt').write_text('\n'.join(urls),encoding='utf-8')
+          for i,url in enumerate(urls):
+              if i>20: break
+              dest=out/f'ota_asset_{i}.bin'
+              subprocess.run(['curl','-fLsS','--retry','3','--max-time','600',url,'-o',str(dest)],check=False)
+          PY
+
+          for f in result/ota_asset_*.bin; do
+            [ -f "$f" ] || continue
+            file "$f" >> result/ota_assets_file_types.txt
+            if file "$f" | grep -qi 'Hermes JavaScript bytecode'; then
+              cp "$f" result/ota-index.android.bundle
+              break
+            fi
+          done
+          if [ -f result/ota-index.android.bundle ]; then
+            sha256sum result/ota-index.android.bundle | tee result/ota_bundle_sha256.txt
+            strings -a -n 5 result/ota-index.android.bundle > result/ota_bundle_strings.txt
+            hbc-file-parser result/ota-index.android.bundle > result/ota_hbc_header.txt 2> result/ota_hbc_header.err || true
+            hbc-decompiler result/ota-index.android.bundle result/ota_decompiled.js > result/ota_decompiler.stdout 2> result/ota_decompiler.stderr || true
+            test -f result/ota_decompiled.js && gzip -9 result/ota_decompiled.js
+          fi
+
+      - name: Extract focused strings and URLs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          for f in result/*bundle_strings.txt; do
+            [ -f "$f" ] || continue
+            base="${f%_strings.txt}"
+            grep -Eio 'https?://[^[:space:]"'"'<>\\]+' "$f" | sort -u > "${base}_urls.txt"
+            grep -Ei 'meeting\.ai|bahasalab|audyno|api|graphql|websocket|wss:|transcri|speaker|record|upload|multipart|calendar|agent|chat|skill|coin|billing|sentry|appsflyer|firebase|openai|anthropic|deepgram|assemblyai|speechmatics|supabase|cloudflare|aws|googleapis' "$f" \
+              | sort -u > "${base}_focused_strings.txt"
+          done
+          cp /tmp/hermes-packages.txt result/hermes_packages.txt
+          find result -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort > result/INVENTORY.tsv
+          cat result/embedded_hbc_header.txt 2>/dev/null | head -120 || true
+          cat result/ota_response_headers.txt 2>/dev/null || true
+          cat result/ota_urls.txt 2>/dev/null || true
+
+      - name: Upload Hermes and OTA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meeting-ai-hermes-evidence
+          path: result/
+          if-no-files-found: error
+          retention-days: 2
