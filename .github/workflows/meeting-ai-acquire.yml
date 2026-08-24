@@ -1,0 +1,89 @@
+name: Meeting.ai APK acquisition
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [meeting-ai-static-analysis-20260824]
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install package inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aapt apksigner file jq p7zip-full unzip
+
+      - name: Download and verify installation package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p output/unpacked
+          urls=(
+            'https://d.apkpure.net/b/XAPK/ai.meeting.app?version=latest'
+            'https://d.apkpure.com/b/XAPK/ai.meeting.app?version=latest'
+            'https://d.cdnpure.com/b/XAPK/ai.meeting.app?version=latest'
+            'https://d.apkpure.net/b/XAPK/ai.meeting.app?versionCode=844'
+            'https://d.apkpure.com/b/XAPK/ai.meeting.app?versionCode=844'
+            'https://d.cdnpure.com/b/XAPK/ai.meeting.app?versionCode=844'
+            'https://d.apkpure.net/b/APK/ai.meeting.app?version=latest'
+            'https://d.apkpure.com/b/APK/ai.meeting.app?version=latest'
+            'https://d.cdnpure.com/b/APK/ai.meeting.app?version=latest'
+          )
+          found=''
+          for url in "${urls[@]}"; do
+            rm -f output/package.bin
+            if curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 900 \
+              -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36' \
+              -e 'https://apkpure.net/meeting-ai-ai-visual-notes/ai.meeting.app/download' \
+              -H 'Accept: application/octet-stream,application/vnd.android.package-archive,*/*' \
+              "$url" -o output/package.bin; then
+              if unzip -tq output/package.bin >/dev/null 2>&1; then
+                found="$url"
+                break
+              fi
+            fi
+          done
+          test -n "$found"
+          printf '%s\n' "$found" > output/source_url.txt
+          cp output/package.bin output/package.xapk
+          sha256sum output/package.xapk | tee output/package_sha256.txt
+          sha1sum output/package.xapk | tee output/package_sha1.txt
+          file output/package.xapk | tee output/package_type.txt
+          unzip -q output/package.xapk -d output/unpacked
+          find output/unpacked -type f -printf '%P\t%s\n' | sort > output/unpacked_inventory.tsv
+
+          base=''
+          while IFS= read -r apk; do
+            line="$(aapt dump badging "$apk" 2>/dev/null | head -1 || true)"
+            if grep -q "package: name='ai.meeting.app'" <<<"$line" && ! grep -q " split='" <<<"$line"; then
+              base="$apk"
+              break
+            fi
+          done < <(find output/unpacked -type f -name '*.apk' | sort)
+          if [ -z "$base" ]; then
+            base="$(find output/unpacked -type f -name '*.apk' -printf '%s\t%p\n' | sort -nr | head -1 | cut -f2-)"
+          fi
+          test -n "$base"
+          cp "$base" output/base.apk
+          aapt dump badging output/base.apk | tee output/aapt_badging.txt
+          aapt dump permissions output/base.apk | tee output/aapt_permissions.txt
+          apksigner verify --verbose --print-certs output/base.apk | tee output/signing.txt
+          sha256sum output/base.apk | tee output/base_sha256.txt
+          sha1sum output/base.apk | tee output/base_sha1.txt
+
+      - name: Upload verified package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meeting-ai-apk-package
+          path: output/
+          if-no-files-found: error
+          retention-days: 2
