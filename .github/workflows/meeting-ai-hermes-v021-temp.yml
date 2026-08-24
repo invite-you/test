@@ -1,0 +1,189 @@
+name: Temporary Meeting.ai HBC98 focused decompilation
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze-hbc98:
+    if: github.head_ref == 'meeting-ai-static-analysis-20260824'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install utilities and verified HBC98 decompiler
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y binutils file jq python3 unzip zip
+          TOOL_URL='https://github.com/SymbioticSec/hermes-decomp/releases/download/v0.2.1/hermes-decomp-v0.2.1-linux-x86_64.tar.gz'
+          TOOL_SHA='f10c879e5b63c5fbff66fb57a3dc4a4a8ca226197fb4aaeec0ac2ce67100acb3'
+          curl -fL --retry 3 --retry-all-errors "$TOOL_URL" -o /tmp/hermes-decomp.tar.gz
+          echo "$TOOL_SHA  /tmp/hermes-decomp.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/hermes-tool
+          tar -xzf /tmp/hermes-decomp.tar.gz -C /tmp/hermes-tool
+          find /tmp/hermes-tool -type f -maxdepth 3 -printf '%p\n'
+          BIN="$(find /tmp/hermes-tool -type f -name hermes-decomp | head -1)"
+          test -n "$BIN"
+          chmod +x "$BIN"
+          cp "$BIN" /tmp/hermes-decomp
+          /tmp/hermes-decomp --version | tee /tmp/hermes-version.txt
+          /tmp/hermes-decomp --help > /tmp/hermes-help.txt
+
+      - name: Acquire signed public app bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p work/xapk work/base result
+          curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 900 \
+            -A 'Mozilla/5.0' \
+            -e 'https://apkpure.net/meeting-ai-ai-visual-notes/ai.meeting.app/download' \
+            'https://d.apkpure.net/b/XAPK/ai.meeting.app?version=latest' -o work/package.xapk
+          unzip -q work/package.xapk -d work/xapk
+          cp work/xapk/ai.meeting.app.apk work/base.apk
+          unzip -q work/base.apk assets/index.android.bundle assets/app.config -d work/base
+          cp work/base/assets/index.android.bundle work/app.hbc
+          cp work/base/assets/app.config result/app.config
+          file work/app.hbc | tee result/hbc_file.txt
+          sha256sum work/app.hbc | tee result/hbc_sha256.txt
+          cp /tmp/hermes-version.txt result/hermes_version.txt
+          cp /tmp/hermes-help.txt result/hermes_help.txt
+
+      - name: Analyze and decompile bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          /tmp/hermes-decomp info work/app.hbc > result/hbc_info.txt 2> result/hbc_info.stderr || true
+          /tmp/hermes-decomp modules work/app.hbc > result/modules.txt 2> result/modules.stderr || true
+          /tmp/hermes-decomp deps work/app.hbc > result/deps.txt 2> result/deps.stderr || true
+          /tmp/hermes-decomp dump work/app.hbc --kind strings --json > result/strings.json 2> result/strings.stderr || true
+          /tmp/hermes-decomp secrets work/app.hbc > /tmp/secrets.raw 2> result/secrets.stderr || true
+          /tmp/hermes-decomp decompile work/app.hbc -o /tmp/meeting_ai_decompiled.js \
+            > result/decompile.stdout 2> result/decompile.stderr
+          test -s /tmp/meeting_ai_decompiled.js
+          wc -c -l /tmp/meeting_ai_decompiled.js | tee result/decompiled_size.txt
+          sha256sum /tmp/meeting_ai_decompiled.js | tee result/decompiled_sha256.txt
+
+      - name: Produce sanitized, focused code evidence
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+          import json, re
+          from pathlib import Path
+
+          src=Path('/tmp/meeting_ai_decompiled.js')
+          out=Path('result')
+          text=src.read_text(errors='replace')
+          lines=text.splitlines()
+
+          secret_patterns=[
+            (re.compile(r'AIza[0-9A-Za-z_-]{20,}'), 'AIza<redacted>'),
+            (re.compile(r'(?i)(Bearer\s+)[A-Za-z0-9._~-]{12,}'), r'\1<redacted>'),
+            (re.compile(r'(?i)(sk-)[A-Za-z0-9_-]{16,}'), r'\1<redacted>'),
+            (re.compile(r'(?i)((?:api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|authorization)["\']?\s*[:=]\s*["\'])[^"\']+'), r'\1<redacted>'),
+            (re.compile(r'(?i)([?&](?:token|key|secret|sig|signature|auth|code)=)[^&\s"\']+'), r'\1<redacted>'),
+            (re.compile(r'https://[0-9a-f]{20,}@[A-Za-z0-9.-]+'), 'https://<redacted>@sentry-host'),
+          ]
+          def redact(s:str)->str:
+            for p,r in secret_patterns: s=p.sub(r,s)
+            return s
+
+          # URL inventory.
+          urls=sorted(set(re.findall(r'https?://[^\s"\'<>\\)\]]+',text,re.I)))
+          (out/'urls_redacted.txt').write_text('\n'.join(redact(u)[:800] for u in urls),encoding='utf-8')
+
+          # API and route strings, primarily app-specific.
+          string_literals=re.findall(r'(["\'])(.*?)(?<!\\)\1',text,re.S)
+          vals=[]
+          for _,s in string_literals:
+            if len(s)>1200: continue
+            low=s.lower()
+            if ('/api/' in low or 'api.meeting.ai' in low or low.startswith('/v1/') or low.startswith('/v2/') or
+                any(x in low for x in ['transcri','recording','speaker','upload','presign','signed-url','signed_url','websocket','eventsource','multipart','meeting.ai','agent','chat/thread','skill','calendar/redirect'])):
+              vals.append(redact(s.replace('\\n',' ')))
+          vals=sorted(set(vals),key=lambda x:(x.lower(),x))
+          (out/'app_route_and_protocol_strings.txt').write_text('\n'.join(vals),encoding='utf-8')
+
+          groups={
+            'network_api': r'api\.meeting\.ai|/api/v[0-9]+/|fetch\(|axios|XMLHttpRequest|WebSocket|EventSource|socket\.io|wss:|Authorization|Bearer|retry|timeout',
+            'recording_audio': r'AudioRecord|MediaRecorder|react-native-audio-api|AudioManager|sampleRate|bitRate|channelCount|recording|waveform|microphone|pauseRecording|resumeRecording',
+            'upload_offline': r'upload|multipart|FormData|presign|signed.?url|chunk|partNumber|retryUpload|reupload|offline|network.?metered|background.?upload',
+            'transcript_speaker': r'transcri|speaker|diarization|voice.?match|live.?note|partial.?transcript|final.?transcript|subtitle|caption',
+            'agent_chat': r'agent|chat.?thread|claw_thread_id|skill|artifact|sandbox|workspace|tool.?call|message.?stream|SSE|event.?stream',
+            'storage_auth': r'AsyncStorage|SecureStore|expo-sqlite|SQLite|database|persist|refresh.?token|access.?token|credential|Keychain|Keystore|biometric',
+            'analytics_privacy': r'PostHog|AppsFlyer|Sentry|Clarity|Google Analytics|consent|session.?replay|analytics',
+            'billing_credits': r'billing|purchase|subscription|coin|credit|allowance|RevenueCat|expo-iap|verify.*purchase',
+          }
+
+          def contexts(pattern:str, max_hits=350, before=7, after=13):
+            rx=re.compile(pattern,re.I)
+            hit_lines=[]
+            for i,line in enumerate(lines):
+              if rx.search(line): hit_lines.append(i)
+            # Merge nearby windows.
+            windows=[]
+            for i in hit_lines[:max_hits*3]:
+              a=max(0,i-before); b=min(len(lines),i+after+1)
+              if windows and a<=windows[-1][1]+3: windows[-1]=(windows[-1][0],max(windows[-1][1],b))
+              else: windows.append((a,b))
+              if len(windows)>=max_hits: break
+            chunks=[]
+            for a,b in windows:
+              chunks.append(f'\n===== lines {a+1}-{b} =====')
+              for j in range(a,b):
+                line=redact(lines[j])
+                if len(line)>1200: line=line[:1200]+'…'
+                chunks.append(f'{j+1:09d}: {line}')
+            return '\n'.join(chunks)+'\n',len(hit_lines),len(windows)
+
+          summary=[]
+          for name,pat in groups.items():
+            body,hits,wins=contexts(pat)
+            (out/f'code_context_{name}.txt').write_text(body,encoding='utf-8')
+            summary.append(f'{name}\tmatching_lines={hits}\twindows_saved={wins}')
+          (out/'focused_context_summary.tsv').write_text('\n'.join(summary),encoding='utf-8')
+
+          # Function names and line locations around app-specific API calls.
+          func_rx=re.compile(r'^(?:async\s+)?function\s+([A-Za-z0-9_$]+)|^(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?\(?')
+          current='<global>'
+          index=[]
+          needles=re.compile(r'api\.meeting\.ai|/api/v[0-9]+/|transcri|recording|upload|WebSocket|EventSource|presign|signed.?url|chat.?thread|claw_thread_id',re.I)
+          for i,line in enumerate(lines,1):
+            m=func_rx.search(line.strip())
+            if m: current=next(x for x in m.groups() if x) if any(m.groups()) else current
+            if needles.search(line): index.append(f'{i}\t{current}\t{redact(line.strip())[:900]}')
+          (out/'app_code_index.tsv').write_text('\n'.join(index),encoding='utf-8')
+
+          # Redact secret scanner output if present.
+          raw=Path('/tmp/secrets.raw')
+          if raw.exists():
+            (out/'secret_scanner_redacted.txt').write_text(redact(raw.read_text(errors='replace')),encoding='utf-8')
+
+          # Do not retain full decompiled proprietary source.
+          (out/'analysis_note.txt').write_text(
+            'Full JavaScript was decompiled transiently for analysis and intentionally omitted. '
+            'This artifact contains only redacted inventories, indexes, and limited code contexts.\n',encoding='utf-8')
+          PY
+
+          for query in 'https://api.meeting.ai' '/api/v1/' 'WebSocket' 'EventSource' 'transcription' 'presign' 'claw_thread_id'; do
+            safe="$(echo "$query" | tr -c 'A-Za-z0-9' '_' | sed 's/_\+$//')"
+            /tmp/hermes-decomp xref work/app.hbc --query "$query" > "result/xref_${safe}.txt" 2>&1 || true
+          done
+          find result -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort > result/INVENTORY.tsv
+
+      - name: Upload focused evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meeting-ai-hbc98-focused-evidence
+          path: result/
+          if-no-files-found: error
+          retention-days: 2
