@@ -52,7 +52,6 @@ jobs:
           printf '%s\n%s\n' "$JADX_NAME" "$JADX_URL" > output/meta/jadx-source.txt
           cp /usr/bin/apktool /usr/bin/aapt /usr/bin/apksigner output/apktool/usr/bin/
           cp -a /usr/share/apktool output/apktool/usr/share/
-          cp -a /usr/share/apksigner output/apktool/usr/share/
           dpkg-query -W apktool aapt apksigner > output/meta/debian-package-versions.txt
           find output -type f -printf '%P\t%s\n' | sort > output/meta/inventory.tsv
           du -sh output
