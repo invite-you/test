@@ -1,0 +1,52 @@
+name: Temporary Android reverse-engineering tool bundle
+
+on:
+  push:
+    branches: [meeting-ai-static-analysis-20260824]
+    paths:
+      - .github/workflows/meeting-ai-tool-bundle.yml
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install and package tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y apktool aapt apksigner jq unzip zip
+
+          JADX_URL="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest \
+            | jq -r '.assets[] | select(.name | test("jadx-[0-9].*\\.zip$")) | .browser_download_url' \
+            | head -1)"
+          test -n "$JADX_URL"
+          curl -fL --retry 3 --retry-all-errors "$JADX_URL" -o /tmp/jadx.zip
+          unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx /tmp/jadx/bin/jadx-gui
+          /tmp/jadx/bin/jadx --version | tee /tmp/jadx-version.txt
+
+          mkdir -p bundle/jadx bundle/usr/bin bundle/usr/share bundle/meta
+          cp -a /tmp/jadx/. bundle/jadx/
+          cp /usr/bin/apktool /usr/bin/aapt /usr/bin/apksigner bundle/usr/bin/
+          cp -a /usr/share/apktool bundle/usr/share/
+          cp -a /usr/share/apksigner bundle/usr/share/
+          cp /tmp/jadx-version.txt bundle/meta/
+          dpkg-query -W apktool aapt apksigner > bundle/meta/debian-package-versions.txt
+          find bundle -type f -printf '%P\t%s\n' | sort > bundle/meta/inventory.tsv
+          du -sh bundle
+
+      - name: Upload tool bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: meeting-ai-android-analysis-tools
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6

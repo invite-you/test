@@ -1,0 +1,429 @@
+name: Meeting.ai static analysis
+
+on:
+  push:
+    branches:
+      - meeting-ai-static-analysis-20260824
+    paths:
+      - .github/workflows/meeting-ai-static-analysis.yml
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install analysis dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y aapt apksigner apktool binutils file jq p7zip-full python3 python3-pip ripgrep tree unzip zip
+          JADX_URL="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest | jq -r '.assets[] | select(.name | test("jadx-[0-9].*\\.zip$")) | .browser_download_url' | head -1)"
+          test -n "$JADX_URL"
+          curl -fL --retry 3 "$JADX_URL" -o /tmp/jadx.zip
+          sudo unzip -q /tmp/jadx.zip -d /opt/jadx
+          sudo chmod +x /opt/jadx/bin/jadx /opt/jadx/bin/jadx-gui
+          /opt/jadx/bin/jadx --version
+
+      - name: Acquire original installation package
+        id: acquire
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p work/download work/xapk result
+          urls=(
+            'https://d.apkpure.net/b/XAPK/ai.meeting.app?version=latest'
+            'https://d.apkpure.com/b/XAPK/ai.meeting.app?version=latest'
+            'https://d.apkpure.net/b/APK/ai.meeting.app?version=latest'
+            'https://d.apkpure.com/b/APK/ai.meeting.app?version=latest'
+            'https://d.apkpure.net/b/XAPK/ai.meeting.app?versionCode=844'
+            'https://d.apkpure.com/b/XAPK/ai.meeting.app?versionCode=844'
+          )
+          ok=''
+          n=0
+          for url in "${urls[@]}"; do
+            n=$((n+1))
+            out="work/download/candidate-${n}.bin"
+            echo "Trying source ${n}: ${url%%\?*}"
+            if curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 900 -A 'Mozilla/5.0' "$url" -o "$out"; then
+              if unzip -tq "$out" >/dev/null 2>&1; then
+                ok="$out"
+                printf '%s\n' "$url" > result/acquisition_source.txt
+                break
+              fi
+            fi
+            rm -f "$out"
+          done
+          test -n "$ok"
+          cp "$ok" work/package.xapk
+          sha256sum work/package.xapk | tee result/package_sha256.txt
+          sha1sum work/package.xapk | tee result/package_sha1.txt
+          file work/package.xapk | tee result/package_file_type.txt
+          unzip -q work/package.xapk -d work/xapk
+          find work/xapk -maxdepth 3 -type f -printf '%P\t%s bytes\n' | sort > result/xapk_inventory.txt
+
+          base=''
+          while IFS= read -r apk; do
+            if aapt dump badging "$apk" 2>/dev/null | head -1 | grep -q "package: name='ai.meeting.app'"; then
+              pkgline="$(aapt dump badging "$apk" 2>/dev/null | head -1)"
+              if ! grep -q " split='" <<<"$pkgline"; then
+                base="$apk"
+                break
+              fi
+            fi
+          done < <(find work/xapk -type f -name '*.apk' | sort)
+          if [ -z "$base" ]; then
+            base="$(find work/xapk -type f -name '*.apk' -printf '%s\t%p\n' | sort -nr | head -1 | cut -f2-)"
+          fi
+          test -n "$base"
+          cp "$base" work/base.apk
+          echo "$base" | tee result/base_apk_path.txt
+          aapt dump badging work/base.apk | tee result/aapt_badging.txt
+          aapt dump permissions work/base.apk | tee result/aapt_permissions.txt
+          sha256sum work/base.apk | tee result/base_apk_sha256.txt
+          sha1sum work/base.apk | tee result/base_apk_sha1.txt
+          apksigner verify --verbose --print-certs work/base.apk | tee result/signing.txt
+
+      - name: Decode resources and decompile DEX
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euxo pipefail
+          mkdir -p work/apktool work/jadx
+          apktool d -f work/base.apk -o work/apktool 2>&1 | tee result/apktool.log
+          /opt/jadx/bin/jadx -j 4 --deobf --show-bad-code -d work/jadx work/base.apk 2>&1 | tee result/jadx.log
+
+      - name: Generate technical report from decoded code
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+          import hashlib, os, re, subprocess, textwrap, xml.etree.ElementTree as ET
+          from collections import Counter, defaultdict
+          from pathlib import Path
+
+          ROOT = Path('work')
+          RES = Path('result')
+          RES.mkdir(exist_ok=True)
+          APK = ROOT / 'base.apk'
+          APKTOOL = ROOT / 'apktool'
+          JADX = ROOT / 'jadx'
+          ANDROID = '{http://schemas.android.com/apk/res/android}'
+
+          def cmd(args):
+              try:
+                  return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT, errors='replace')
+              except Exception as e:
+                  return f'[command failed: {e}]'
+
+          def read_text(path: Path, limit=8_000_000):
+              try:
+                  b = path.read_bytes()[:limit]
+                  return b.decode('utf-8', 'replace')
+              except Exception:
+                  return ''
+
+          badging = read_text(RES/'aapt_badging.txt')
+          first = badging.splitlines()[0] if badging else ''
+          def attr(name):
+              m = re.search(rf"\b{name}='([^']*)'", first)
+              return m.group(1) if m else 'unknown'
+          package_name = attr('name')
+          version_code = attr('versionCode')
+          version_name = attr('versionName')
+          sdk_m = re.search(r"sdkVersion:'([^']+)'", badging)
+          target_m = re.search(r"targetSdkVersion:'([^']+)'", badging)
+          min_sdk = sdk_m.group(1) if sdk_m else 'unknown'
+          target_sdk = target_m.group(1) if target_m else 'unknown'
+
+          # APK and split inventory
+          apk_files = sorted((ROOT/'xapk').rglob('*.apk'))
+          dex_files = []
+          native_files = []
+          zip_list = cmd(['unzip','-l',str(APK)])
+          for line in zip_list.splitlines():
+              m = re.match(r'\s*(\d+)\s+\S+\s+\S+\s+(.+)$', line)
+              if not m: continue
+              size, name = int(m.group(1)), m.group(2).strip()
+              if re.fullmatch(r'classes\d*\.dex', Path(name).name): dex_files.append((name,size))
+              if name.startswith('lib/') and name.endswith('.so'): native_files.append((name,size))
+          (RES/'native_libraries.txt').write_text('\n'.join(f'{n}\t{s}' for n,s in native_files), encoding='utf-8')
+          (RES/'dex_inventory.txt').write_text('\n'.join(f'{n}\t{s}' for n,s in dex_files), encoding='utf-8')
+
+          # Framework detection from archive contents
+          names = zip_list.lower()
+          framework = []
+          if 'libflutter.so' in names or 'assets/flutter_assets/' in names: framework.append('Flutter (AOT Dart)')
+          if 'index.android.bundle' in names or 'libreactnativejni.so' in names: framework.append('React Native')
+          if 'assets/www/' in names and ('cordova' in names or 'capacitor' in names): framework.append('Cordova/Capacitor')
+          if not framework: framework.append('Native Android or another framework; no canonical Flutter/React Native marker found')
+
+          # Manifest
+          manifest_path = APKTOOL/'AndroidManifest.xml'
+          manifest_text = read_text(manifest_path)
+          if manifest_text:
+              (RES/'AndroidManifest.xml').write_text(manifest_text, encoding='utf-8')
+          permissions=[]; components=[]; exported=[]; providers=[]
+          app_attrs={}
+          try:
+              tree=ET.parse(manifest_path); root=tree.getroot()
+              for p in root.findall('uses-permission') + root.findall('uses-permission-sdk-23'):
+                  permissions.append(p.get(ANDROID+'name',''))
+              app=root.find('application')
+              if app is not None:
+                  for k in ['debuggable','allowBackup','fullBackupContent','dataExtractionRules','usesCleartextTraffic','networkSecurityConfig','requestLegacyExternalStorage']:
+                      v=app.get(ANDROID+k)
+                      if v is not None: app_attrs[k]=v
+                  for tag in ['activity','activity-alias','service','receiver','provider']:
+                      for el in app.findall(tag):
+                          name=el.get(ANDROID+'name','')
+                          exp=el.get(ANDROID+'exported')
+                          has_filter=el.find('intent-filter') is not None
+                          authority=el.get(ANDROID+'authorities','')
+                          components.append((tag,name,exp,has_filter,authority))
+                          if exp=='true' or (exp is None and has_filter): exported.append((tag,name,exp,has_filter,authority))
+                          if tag=='provider': providers.append((name,authority,exp))
+          except Exception as e:
+              (RES/'manifest_parse_error.txt').write_text(str(e), encoding='utf-8')
+          (RES/'permissions.txt').write_text('\n'.join(sorted(set(permissions))), encoding='utf-8')
+          (RES/'components.tsv').write_text('\n'.join('\t'.join(map(str,x)) for x in components), encoding='utf-8')
+          (RES/'exported_components.tsv').write_text('\n'.join('\t'.join(map(str,x)) for x in exported), encoding='utf-8')
+
+          # Collect textual evidence without retaining full proprietary source in artifact.
+          source_roots=[JADX/'sources', JADX/'resources', APKTOOL/'smali', APKTOOL/'smali_classes2', APKTOOL/'smali_classes3', APKTOOL/'assets', APKTOOL/'res']
+          text_ext={'.java','.kt','.xml','.json','.txt','.properties','.yml','.yaml','.smali','.js','.dart','.html','.md'}
+          text_files=[]
+          for base in source_roots:
+              if base.exists():
+                  for p in base.rglob('*'):
+                      try:
+                          if p.is_file() and p.stat().st_size <= 4_000_000 and (p.suffix.lower() in text_ext or p.name in {'AssetManifest.json','FontManifest.json'}):
+                              text_files.append(p)
+                      except OSError: pass
+
+          # Add strings extracted from native libraries and DEX, useful for Flutter/AOT apps.
+          strings_chunks=[]
+          extract_targets=[APK]
+          for p in (APKTOOL/'lib').rglob('*.so') if (APKTOOL/'lib').exists() else []:
+              extract_targets.append(p)
+          for p in extract_targets:
+              try:
+                  out=subprocess.check_output(['strings','-a','-n','6',str(p)], text=True, errors='replace', stderr=subprocess.DEVNULL)
+                  strings_chunks.append((str(p),out))
+              except Exception: pass
+          all_native_strings='\n'.join(t for _,t in strings_chunks)
+          (RES/'binary_strings_keywords.txt').write_text('',encoding='utf-8')
+
+          url_re=re.compile(r'https?://[^\s\"\'<>\\]+',re.I)
+          domain_re=re.compile(r'(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|ai|app|dev|co|cloud|me|xyz|sg|id|googleapis\.com)(?::\d+)?',re.I)
+          urls=set(); domains=set();
+          evidence=[]
+          provider_hits=defaultdict(set)
+          secret_hits=defaultdict(set)
+
+          indicators={
+            'Flutter':['io.flutter','flutterembedding','libflutter.so','flutter_assets'],
+            'Firebase':['com.google.firebase','firebaseinstallations','firebaseapp','google_app_id'],
+            'Google Analytics':['com.google.android.gms.measurement','firebase.analytics'],
+            'Sentry':['io.sentry','sentry_dsn','sentry.io'],
+            'AppsFlyer':['com.appsflyer','appsflyer'],
+            'PostHog':['posthog'],
+            'Amplitude':['com.amplitude','amplitude'],
+            'Mixpanel':['mixpanel'],
+            'Microsoft Clarity':['clarity'],
+            'RevenueCat':['com.revenuecat','purchases'],
+            'Google Play Billing':['com.android.billingclient','billingclient'],
+            'OneSignal':['onesignal'],
+            'Intercom':['io.intercom','intercom'],
+            'Facebook SDK':['com.facebook','facebook_app_id'],
+            'Google Sign-In':['com.google.android.gms.auth.api.signin'],
+            'Microsoft identity':['com.microsoft.identity','msal'],
+            'OkHttp':['okhttp3','okhttp'],
+            'Retrofit':['retrofit2'],
+            'WebSocket':['websocket'],
+            'Socket.IO':['socket.io','socketio'],
+            'gRPC':['io.grpc','grpc'],
+            'WebRTC':['org.webrtc','webrtc'],
+            'LiveKit':['io.livekit','livekit'],
+            'Room':['androidx.room'],
+            'DataStore':['androidx.datastore'],
+            'SQLCipher':['sqlcipher'],
+            'Realm':['io.realm'],
+            'WorkManager':['androidx.work'],
+            'Foreground service':['startforeground','foreground_service'],
+            'MediaRecorder':['android.media.mediarecorder','mediarecorder'],
+            'AudioRecord':['android.media.audiorecord','audiorecord'],
+            'ExoPlayer / Media3':['androidx.media3','exoplayer'],
+            'Deepgram':['deepgram'],
+            'AssemblyAI':['assemblyai'],
+            'Speechmatics':['speechmatics'],
+            'Google Speech':['speech.googleapis.com','google.cloud.speech'],
+            'Azure Speech':['speech.microsoft.com','cognitiveservices'],
+            'AWS Transcribe':['transcribe.amazonaws.com','awstranscribe'],
+            'OpenAI':['api.openai.com','openai'],
+            'Anthropic':['api.anthropic.com','anthropic'],
+            'DeepSeek':['deepseek'],
+            'Zhipu/GLM':['bigmodel.cn','zhipu','glm-'],
+            'Agora':['io.agora','agora'],
+            'Twilio':['com.twilio','twilio'],
+          }
+          secret_patterns={
+            'Google API key':re.compile(r'AIza[0-9A-Za-z_-]{20,}'),
+            'Generic API key assignment':re.compile(r'(?i)(?:api[_-]?key|client[_-]?secret|access[_-]?token)\s*[:=]\s*[\"\'][^\"\']{8,}[\"\']'),
+            'Bearer token literal':re.compile(r'(?i)Bearer\s+[A-Za-z0-9._-]{12,}'),
+            'OpenAI-style key':re.compile(r'sk-[A-Za-z0-9_-]{16,}'),
+          }
+
+          def sanitize_url(u):
+              return re.sub(r'([?&](?:token|key|secret|sig|signature|auth|code)=)[^&]+',r'\1<redacted>',u,flags=re.I)[:500]
+
+          def process_text(label, text):
+              low=text.lower()
+              for u in url_re.findall(text):
+                  u=sanitize_url(u.rstrip('.,);]}'))
+                  urls.add(u)
+                  try:
+                      host=re.sub(r'^https?://','',u,flags=re.I).split('/')[0].lower()
+                      if '.' in host: domains.add(host)
+                  except Exception: pass
+              for d in domain_re.findall(text): domains.add(d.lower())
+              for name, needles in indicators.items():
+                  if any(n.lower() in low for n in needles): provider_hits[name].add(label)
+              for name,pat in secret_patterns.items():
+                  if pat.search(text): secret_hits[name].add(label)
+
+          for p in text_files:
+              t=read_text(p)
+              process_text(str(p),t)
+          for label,t in strings_chunks:
+              process_text(label,t)
+
+          (RES/'urls_redacted.txt').write_text('\n'.join(sorted(urls)),encoding='utf-8')
+          (RES/'domains.txt').write_text('\n'.join(sorted(domains)),encoding='utf-8')
+          (RES/'technology_indicators.tsv').write_text('\n'.join(f'{k}\t{len(v)}\t'+';'.join(sorted(v)[:12]) for k,v in sorted(provider_hits.items())),encoding='utf-8')
+          (RES/'embedded_secret_indicators.tsv').write_text('\n'.join(f'{k}\t{len(v)}\t'+';'.join(sorted(v)[:20]) for k,v in sorted(secret_hits.items())),encoding='utf-8')
+
+          # Relevant code matches with limited, non-contiguous excerpts.
+          code_terms=re.compile(r'(?i)(AudioRecord|MediaRecorder|startForeground|WebSocket|socket\.io|grpc|upload|multipart|recording|transcri|speaker|voice.?match|calendar|oauth|meeting|agent|coin|billing|revenuecat|database|sharedpreferences|datastore|encrypt|keystore|certificatepinner|networksecurityconfig)')
+          hits=[]
+          for p in text_files:
+              if len(hits)>=450: break
+              try:
+                  lines=read_text(p).splitlines()
+              except Exception: continue
+              for i,line in enumerate(lines,1):
+                  if code_terms.search(line):
+                      s=line.strip()
+                      if len(s)>700: s=s[:700]+'…'
+                      hits.append(f'{p}:{i}: {s}')
+                      if len(hits)>=450: break
+          (RES/'relevant_code_hits.txt').write_text('\n'.join(hits),encoding='utf-8')
+
+          # Class/package inventory from JADX.
+          package_counts=Counter()
+          java_files=list((JADX/'sources').rglob('*.java')) if (JADX/'sources').exists() else []
+          for p in java_files:
+              rel=p.relative_to(JADX/'sources')
+              top='.'.join(rel.parts[:3]) if len(rel.parts)>=3 else '.'.join(rel.parts[:-1])
+              package_counts[top]+=1
+          (RES/'jadx_package_counts.tsv').write_text('\n'.join(f'{k}\t{v}' for k,v in package_counts.most_common(200)),encoding='utf-8')
+
+          # Native architecture inventory across all split APKs.
+          split_info=[]
+          for apk in apk_files:
+              line=cmd(['aapt','dump','badging',str(apk)]).splitlines()
+              split_info.append(f'## {apk.name}\n'+(line[0] if line else '')+'\nsize='+str(apk.stat().st_size))
+          (RES/'split_apk_metadata.txt').write_text('\n\n'.join(split_info),encoding='utf-8')
+
+          sensitive_perms=[p for p in permissions if any(x in p for x in ['RECORD_AUDIO','CAMERA','READ_','WRITE_','CONTACTS','CALENDAR','LOCATION','POST_NOTIFICATIONS','FOREGROUND_SERVICE','INTERNET','WAKE_LOCK','BLUETOOTH','AD_ID'])]
+          tech_lines=[]
+          for k,v in sorted(provider_hits.items()):
+              tech_lines.append(f'- **{k}** — evidence in {len(v)} file(s)')
+          if not tech_lines: tech_lines=['- No named SDK/provider indicator was recovered from decoded text or binary strings.']
+          secret_lines=[]
+          for k,v in sorted(secret_hits.items()):
+              secret_lines.append(f'- **{k}** — pattern found in {len(v)} file(s); values intentionally not included')
+          if not secret_lines: secret_lines=['- No obvious hard-coded token/key pattern detected by the limited static scan.']
+
+          report=f'''# Meeting.ai Android static-analysis report
+
+          ## Acquisition and identity
+          - Package: `{package_name}`
+          - Version name: `{version_name}`
+          - Version code: `{version_code}`
+          - Minimum SDK: `{min_sdk}`
+          - Target SDK: `{target_sdk}`
+          - Base APK size: {APK.stat().st_size:,} bytes
+          - Split APK count in acquired package: {len(apk_files)}
+          - DEX files: {len(dex_files)}
+          - Native `.so` entries in base APK: {len(native_files)}
+          - Detected application framework: {', '.join(framework)}
+
+          ## Manifest security posture
+          - Declared permissions: {len(set(permissions))}
+          - Sensitive/operational permissions: {', '.join(f'`{p}`' for p in sorted(set(sensitive_perms))) or 'none recovered'}
+          - Components: {len(components)} total; {len(exported)} exported or implicitly exported by intent filter
+          - Application flags: {app_attrs or 'none explicitly declared in decoded manifest'}
+          - Providers: {len(providers)}
+
+          ## Technology and SDK indicators
+          {chr(10).join(tech_lines)}
+
+          ## Embedded credential indicators
+          {chr(10).join(secret_lines)}
+
+          ## Network surface
+          - Distinct URL strings recovered: {len(urls)}
+          - Distinct domain/host strings recovered: {len(domains)}
+          - Full redacted URL and domain inventories are included in `urls_redacted.txt` and `domains.txt`.
+
+          ## Code recovery quality
+          - JADX Java source files: {len(java_files)}
+          - Relevant code/string matches retained: {len(hits)}
+          - APKTool manifest/resources decoded: {'yes' if manifest_text else 'no'}
+          - For Flutter/AOT builds, most Dart business logic resides in native `libapp.so`; Java decompilation mainly exposes the Android host and third-party plugins. Binary-string evidence is therefore included.
+
+          ## Artifact contents
+          The artifact intentionally contains metadata, decoded manifest, inventories, and limited matching lines—not the complete proprietary decompiled source tree.
+          '''
+          report=textwrap.dedent(report).strip()+"\n"
+          (RES/'report.md').write_text(report,encoding='utf-8')
+          print('=== BEGIN STATIC ANALYSIS REPORT ===')
+          print(report)
+          print('=== END STATIC ANALYSIS REPORT ===')
+          print('=== TOP DOMAINS ===')
+          print('\n'.join(sorted(domains)[:120]))
+          print('=== TECHNOLOGY INDICATORS ===')
+          print((RES/'technology_indicators.tsv').read_text(encoding='utf-8'))
+          PY
+
+      - name: Add compact archive inventory
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          find result -maxdepth 1 -type f -printf '%f\t%s bytes\n' | sort | tee result/artifact_inventory.txt
+          echo '=== SIGNING ==='
+          cat result/signing.txt 2>/dev/null || true
+          echo '=== AAPT BADGING ==='
+          head -80 result/aapt_badging.txt 2>/dev/null || true
+          echo '=== EXPORTED COMPONENTS ==='
+          cat result/exported_components.tsv 2>/dev/null || true
+          echo '=== RELEVANT CODE HITS (first 160) ==='
+          head -160 result/relevant_code_hits.txt 2>/dev/null || true
+
+      - name: Upload analysis artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meeting-ai-static-analysis
+          path: result/
+          if-no-files-found: warn
+          retention-days: 3

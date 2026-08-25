@@ -1,0 +1,4 @@
+Temporary trigger for static analysis on 2026-08-24.
+Hermes and Expo OTA inspection pass.
+HBC98 v0.2.1 focused decompilation pass.
+Verified local Hermes tool acquisition pass.

@@ -1,0 +1,1 @@
+[Download the unmodified Meeting.ai installation package through the public APK downloader proxy](https://apk-downloader-phi.vercel.app/api/download-apk?name=Meeting.ai&packageId=ai.meeting.app&url=https%3A%2F%2Fd.apkpure.net%2Fb%2FXAPK%2Fai.meeting.app%3Fversion%3Dlatest)
