@@ -1,4 +1,4 @@
-name: Temporary verified Hermes analysis tool
+name: Temporary verified Android analysis tool bundle
 
 on:
   pull_request:
@@ -10,30 +10,58 @@ permissions:
 
 jobs:
   acquire-tool:
-    if: github.head_ref == 'meeting-ai-static-analysis-20260824'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    if: github.head_ref == 'meeting-ai-tools-20260825'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Download and verify hermes-decomp v0.2.1
+
+      - name: Download and verify Hermes decompiler
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p output unpacked
+          mkdir -p output/hermes
           curl -fL --retry 3 --retry-all-errors \
             'https://github.com/SymbioticSec/hermes-decomp/releases/download/v0.2.1/hermes-decomp-v0.2.1-linux-x86_64.tar.gz' \
             -o /tmp/hermes-decomp.tar.gz
           echo 'f10c879e5b63c5fbff66fb57a3dc4a4a8ca226197fb4aaeec0ac2ce67100acb3  /tmp/hermes-decomp.tar.gz' | sha256sum -c -
-          tar -xzf /tmp/hermes-decomp.tar.gz -C unpacked
-          cp unpacked/hermes-decomp output/hermes-decomp
-          chmod +x output/hermes-decomp
-          sha256sum output/hermes-decomp > output/hermes-decomp.sha256
-          output/hermes-decomp --help > output/hermes-decomp-help.txt
-          printf 'SymbioticSec/hermes-decomp v0.2.1 release archive verified against published SHA-256.\n' > output/PROVENANCE.txt
-      - name: Upload verified binary
+          tar -xzf /tmp/hermes-decomp.tar.gz -C output/hermes
+          chmod +x output/hermes/hermes-decomp
+          sha256sum output/hermes/hermes-decomp > output/hermes/hermes-decomp.sha256
+
+      - name: Download current JADX release and package Apktool
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y apktool aapt apksigner jq unzip
+          curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest -o /tmp/jadx-release.json
+          JADX_URL="$(jq -r '.assets[] | select(.name | test("jadx-[0-9].*\\.zip$")) | .browser_download_url' /tmp/jadx-release.json | head -1)"
+          JADX_NAME="$(jq -r '.assets[] | select(.name | test("jadx-[0-9].*\\.zip$")) | .name' /tmp/jadx-release.json | head -1)"
+          JADX_SHA="$(jq -r '.assets[] | select(.name | test("jadx-[0-9].*\\.zip$")) | .digest // empty' /tmp/jadx-release.json | head -1)"
+          test -n "$JADX_URL"
+          curl -fL --retry 3 --retry-all-errors "$JADX_URL" -o /tmp/jadx.zip
+          if [[ "$JADX_SHA" == sha256:* ]]; then
+            echo "${JADX_SHA#sha256:}  /tmp/jadx.zip" | sha256sum -c -
+          fi
+          mkdir -p output/jadx output/apktool/usr/bin output/apktool/usr/share output/meta
+          unzip -q /tmp/jadx.zip -d output/jadx
+          chmod +x output/jadx/bin/jadx output/jadx/bin/jadx-gui
+          output/jadx/bin/jadx --version | tee output/meta/jadx-version.txt
+          sha256sum /tmp/jadx.zip > output/meta/jadx-archive.sha256
+          printf '%s\n%s\n' "$JADX_NAME" "$JADX_URL" > output/meta/jadx-source.txt
+          cp /usr/bin/apktool /usr/bin/aapt /usr/bin/apksigner output/apktool/usr/bin/
+          cp -a /usr/share/apktool output/apktool/usr/share/
+          cp -a /usr/share/apksigner output/apktool/usr/share/
+          dpkg-query -W apktool aapt apksigner > output/meta/debian-package-versions.txt
+          find output -type f -printf '%P\t%s\n' | sort > output/meta/inventory.tsv
+          du -sh output
+
+      - name: Upload verified binaries
         uses: actions/upload-artifact@v4
         with:
-          name: verified-hermes-decomp-v0.2.1-linux-x86_64
+          name: verified-android-reverse-engineering-tools
           path: output/
           if-no-files-found: error
           retention-days: 2
+          compression-level: 6
